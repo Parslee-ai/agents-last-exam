@@ -69,6 +69,13 @@ _GCP_RETRYABLE_ZONE = [
     "quota", "resource_exhausted", "cpus_per_vm_family", "stockout",
     "insufficient", "does not have enough resources",
     "not enough resources", "zone does not have enough",
+    # GCE capacity stockout for a machine type in a zone. The canonical
+    # zone-fallback case, yet the code/message ("ZONE_RESOURCE_POOL_EXHAUSTED",
+    # "... is currently unavailable in the <zone> zone", reason
+    # "resource_availability") matched NONE of the substrings above — so a
+    # transient n2 stockout failed the whole unit instead of trying the next
+    # zone. Match all three forms.
+    "resource_pool_exhausted", "currently unavailable", "resource_availability",
 ]
 
 
@@ -226,8 +233,23 @@ def _machine_chain(machine_type: str, *, is_gpu: bool) -> tuple[str, ...]:
     """
     if is_gpu:
         return (machine_type,)
-    fb = _cpu_family_fallback(machine_type)
-    return (machine_type, fb) if fb else (machine_type,)
+    chain = [machine_type]
+    # E2 tier (e2-<size>), tried BEFORE the N2 fallback. The E2 family is the
+    # most abundant on GCE and almost never capacity-stocked-out, while a single
+    # gcloud create against a drought-stricken N2 zone can hang ~3.5 min before
+    # returning ZONE_RESOURCE_POOL_EXHAUSTED — so walking every N2 zone first
+    # costs tens of minutes per VM. e2-standard-N matches n2-standard-N (4 vCPU /
+    # 16 GB) and boots pd-standard the same way, so it's a like-for-like box that
+    # provisions on the first try. N2 stays last as a same-size backstop.
+    _, _, rest = machine_type.partition("-")
+    if rest:
+        e2 = f"e2-{rest}"
+        if e2 not in chain:
+            chain.append(e2)
+    fb = _cpu_family_fallback(machine_type)  # c* -> n2-*
+    if fb and fb not in chain:
+        chain.append(fb)
+    return tuple(chain)
 
 
 # ============================================================================
@@ -412,7 +434,11 @@ def _boot_disk_type(machine_type: str) -> str:
     family = machine_type.split("-")[0].lower()
     if family in ("c4", "m4", "x4"):
         return "hyperdisk-balanced"
-    return "pd-ssd"
+    # LOCAL CHANGE (not upstream): pd-standard instead of pd-ssd so the 600 GB
+    # image fits DISKS_TOTAL_GB (2048) — pd-ssd AND pd-balanced both count
+    # against SSD_TOTAL_GB (250 on a fresh project); only pd-standard (HDD)
+    # uses the standard-disk pool. Revert to pd-ssd once SSD quota is granted.
+    return "pd-standard"
 
 
 def _build_create_args(

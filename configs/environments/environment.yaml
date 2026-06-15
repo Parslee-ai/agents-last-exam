@@ -51,7 +51,12 @@ snapshots:
       instance_prefix: ale
       network: ale-vpc
       subnet: ale-vpc
-      zones: [us-central1-a, us-east1-b, us-west1-a]
+      # Multi-region fallback. n2-standard capacity is volatile and stocks out
+      # per-zone (saw ZONE_RESOURCE_POOL_EXHAUSTED across us-central1-a / east1-b
+      # / west1-a at once). gcloud tries these in order and skips capacity- or
+      # quota-exhausted zones, so list several across regions — same rationale
+      # as the GPU snapshots below.
+      zones: [us-central1-a, us-central1-b, us-central1-c, us-central1-f, us-east1-b, us-east1-c, us-east1-d, us-east4-a, us-east4-b, us-west1-a, us-west1-b]
     # TODO: ALTERNATIVE — run Ubuntu tasks in a local Docker container instead:
     #   provider: docker
     #   image: ale-ubuntu22-docker          # container ref + port (8000) come from the Image entry
